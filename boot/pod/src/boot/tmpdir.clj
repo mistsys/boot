@@ -155,3 +155,16 @@
 (defn changed
   [before after & props]
   (:changed (diff* before after props)))
+
+(defn import-cache!
+  [fileset dest-dir cache-dir]
+  (doseq [f     (file/file-seq (io/file cache-dir "blob"))
+          :when (.isFile f)
+          :let  [new-blob (io/file (:blob fileset) (.getName f))]
+          :when (not (.exists new-blob))]
+    (file/hard-link f new-blob))
+  (let [manifest (read-string (slurp (io/file cache-dir "manifest.edn")))]
+    (reduce-kv
+     #(assoc-in %1 [:tree %2] (map->TmpFile (assoc %3 :dir dest-dir)))
+     fileset
+     manifest)))
