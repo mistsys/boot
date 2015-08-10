@@ -410,8 +410,9 @@
 
 (defn add-asset
   "Add the contents of the java.io.File dir to the fileset's assets."
-  [fileset ^File dir & {:keys [mergers] :as opts}]
-  (tmpd/add fileset (get-add-dir fileset #{:asset}) dir opts))
+  [fileset ^File dir & {:keys [mergers cached?] :as opts}]
+  (let [dest-dir (get-add-dir fileset #{:asset})]
+    ((if cached? tmpd/import-cache! tmpd/add) fileset dest-dir dir opts)))
 
 (defn mv-asset
   "FIXME: document"
@@ -420,8 +421,9 @@
 
 (defn add-source
   "Add the contents of the java.io.File dir to the fileset's sources."
-  [fileset ^File dir & {:keys [mergers] :as opts}]
-  (tmpd/add fileset (get-add-dir fileset #{:source}) dir opts))
+  [fileset ^File dir & {:keys [mergers cached?] :as opts}]
+  (let [dest-dir (get-add-dir fileset #{:source})]
+    ((if cached? tmpd/import-cache! tmpd/add) fileset dest-dir dir opts)))
 
 (defn mv-source
   "FIXME: document"
@@ -430,8 +432,9 @@
 
 (defn add-resource
   "Add the contents of the java.io.File dir to the fileset's resources."
-  [fileset ^File dir & {:keys [mergers] :as opts}]
-  (tmpd/add fileset (get-add-dir fileset #{:resource}) dir opts))
+  [fileset ^File dir & {:keys [mergers cached?] :as opts}]
+  (let [dest-dir (get-add-dir fileset #{:resource})]
+    ((if cached? tmpd/import-cache! tmpd/add) fileset dest-dir dir opts)))
 
 (defn mv-resource
   "FIXME: document"

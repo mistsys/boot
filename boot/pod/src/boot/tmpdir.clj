@@ -156,8 +156,22 @@
   [before after & props]
   (:changed (diff* before after props)))
 
+(defn export-cache!
+  "Populates cache-dir with an immutable snapshot of source-dir that can later
+  be efficiently added to the fileset using import-cache!"
+  [source-dir cache-dir]
+  (let [manifest (reduce-kv #(assoc %1 %2 (dissoc %3 :dir)) {} (dir->tree source-dir))
+        blob-dir (doto (io/file cache-dir "blob") .mkdirs)]
+    (doseq [[path {:keys [id time]}] manifest]
+      (add-blob! blob-dir (io/file source-dir path) id))
+    (spit (io/file cache-dir "manifest.edn") (pr-str manifest))))
+
 (defn import-cache!
-  [fileset dest-dir cache-dir]
+  "Imports a directory created by export-cache! and returns a new FileSet.
+
+   - dest-dir: the directoy (java.io.File) in the FileSet imported files are added to
+   - cache-dir: the directory (java.io.File) populated by export-cache!"
+  [fileset dest-dir cache-dir opts]
   (doseq [f     (file/file-seq (io/file cache-dir "blob"))
           :when (.isFile f)
           :let  [new-blob (io/file (:blob fileset) (.getName f))]
@@ -168,3 +182,8 @@
      #(assoc-in %1 [:tree %2] (map->TmpFile (assoc %3 :dir dest-dir)))
      fileset
      manifest)))
+
+(defn snapshot-cache?
+  "True if dir has been exported to using export-cache!"
+  [dir]
+  (.exists (io/file dir "manifest.edn")))
