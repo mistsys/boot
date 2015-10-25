@@ -39,7 +39,7 @@ public class App {
     private static String                  githuburl   = "https://api.github.com/repos/boot-clj/boot/releases";
     private static ClojureRuntimeShim      aethershim  = null;
 
-    private static final String            aetherjar   = "aether.uber.jar";
+    private static final String            aetherjar   = "boot-aether-uber.jar";
     private static final AtomicLong        counter     = new AtomicLong(0);
     private static final ExecutorService   ex          = Executors.newCachedThreadPool();
 
