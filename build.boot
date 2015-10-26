@@ -29,16 +29,16 @@ Install Steps
   {:base {:dir #{"boot/base/src"}
           :deps [['org.projectodd.shimdandy/shimdandy-api "1.2.0"]
                  ['junit/junit "3.8.1" :scope "test"]]}
-   :pod {:dir  #{"boot/pod/src/"}
+   :pod {:dir  #{"pod/src/"}
          :deps [['boot/base                               version :scope "provided"]
                 ['org.clojure/clojure                     "1.6.0" :scope "provided"]
                 ['org.tcrawley/dynapath                   "0.2.3" :scope "compile"]
                 ['org.projectodd.shimdandy/shimdandy-impl "1.2.0" :scope "compile"]]}
-   :core {:dir  #{"boot/core/src"}
+   :core {:dir  #{"core/src/"}
           :deps [['org.clojure/clojure "1.6.0" :scope "provided"]
                  ['boot/base           version :scope "provided"]
                  ['boot/pod            version :scope "compile"]]}
-   :aether {:dir  #{"boot/aether/src"}
+   :aether {:dir  #{"aether/src/"}
             :deps [['org.clojure/clojure      "1.6.0" :scope "compile"]
                    ['boot/pod                 version :scope "compile"]
                    ['com.cemerick/pomegranate "0.3.0" :scope "compile"]]}
@@ -74,15 +74,55 @@ Install Steps
        (boot.util/with-let [ret# (do ~@body)]
          ~@(for [[k v] orig] `(boot.core/set-env! ~k ~v))))))
 
-(deftask pod []
-  (with-env {:source-paths (-> settings :pod :dir)
-             :resource-paths (-> settings :pod :dir)
-             :dependencies (-> settings :pod :deps)}
-    (comp (pom :project     'boot/pod
-               :version     version
-               :description "Boot pod module–this is included with all pods.")
-          (aot :all true)
-          (jar :file "boot-pod.jar"))))
+(deftask print-paths []
+  (with-pre-wrap fs
+    (doseq [f (ls fs)]
+      (println (:path f)))
+    (println "--------------------------------")
+    fs))
+
+(deftask with-dir
+  [d dir      DIR   str  "directory in fileset to use as root - must end with /"
+   t task     TASK  code "task to run with scoped fileset as input"
+   m merge-fn MERGE code "function to merge resulting fileset with prev"]
+  (let [ptn          (re-pattern (str "^" dir))
+        dir-as-root  (fn [fs f] (mv fs (:path f) (string/replace (:path f) ptn "")))
+        undo-scoping (fn [fs f]
+                       (let [exists? (->> fs :tree keys set)
+                             new-loc (str dir (:path f))]
+                         (if (exists? new-loc)
+                           (do
+                             (util/dbug "Moving %s to %s\n" (:path f) new-loc)
+                             (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
+                           (do
+                             (util/dbug "Moving %s to %s\n" (:path f) (:path f))
+                             (assoc-in fs [:tree (:path f)] f)))))]
+    (fn [next-handler]
+      (fn [original-fs]
+        (let [scope-fs #(let [in-scope  (by-re [ptn] (ls %))
+                              out-scope (not-by-re [ptn] (ls %))
+                              only-in   (rm % out-scope)]
+                          (reduce dir-as-root only-in in-scope))]
+          ((task
+            (fn [scoped-fs]
+              (next-handler (commit! (reduce undo-scoping original-fs (ls scoped-fs))))))
+           (commit! (scope-fs original-fs))))))))
+
+(set-env! :resource-paths #{"boot"}
+          :source-paths #{"boot"})
+
+(deftask pod
+  [r launch-repl bool "repl"]
+  (set-env! :dependencies (-> settings :pod :deps))
+  (with-dir
+    :dir (-> settings :pod :dir first)
+    :task (if launch-repl
+            (repl)
+            (comp (pom :project     'boot/pod
+                       :version     version
+                       :description "Boot pod module–this is included with all pods.")
+                  (aot :all true)
+                  (jar :file "boot-pod.jar")))))
 
 (deftask worker []
   (with-env {:source-paths (-> settings :worker :dir)
@@ -99,29 +139,29 @@ Install Steps
   [u uberjar bool "build uberjar?"]
   ;; cd bookkt/aether && lein install && lein uberjar && mkdir -p ../base/src/main/resources
   ;;    && cp target/aether-$(version)-standalone.jar ../base/src/main/resources/$(aetheruber)
-  (with-env {:source-paths   (-> settings :aether :dir)
-             :resource-paths (-> settings :aether :dir)
-             :dependencies   (-> settings :aether :deps)}
-    (comp (pom :project     'boot/aether
-               :version     version
-               :description "Boot aether module–performs maven dependency resolution.")
-          (aot :all true)
-          (task-when uberjar (uber))
-          (jar :file (if uberjar
-                       "boot-aether-uber.jar"
-                       "boot-aether.jar")))))
+  (set-env! :dependencies (-> settings :aether :deps))
+  (with-dir
+    :dir (-> settings :aether :dir first)
+    :task (comp (pom :project     'boot/aether
+                     :version     version
+                     :description "Boot aether module–performs maven dependency resolution.")
+                (aot :all true)
+                (task-when uberjar (uber))
+                (jar :file (if uberjar
+                             "boot-aether-uber.jar"
+                             "boot-aether.jar")))))
 
 (deftask core []
   ;; :jar-exclusions [#"^clojure/core/"]
-  (with-env {:source-paths   (-> settings :core :dir)
-           :resource-paths (-> settings :core :dir)
-           :dependencies   (-> settings :core :deps)}
-    (comp (pom :project      'boot/core
-               :version      version
-               :description  "Core boot module–boot scripts run in this pod.")
-          (aot :namespace #{'boot.cli 'boot.core 'boot.git 'boot.main 'boot.repl
-                            'boot.task.built-in 'boot.task-helpers 'boot.tmregistry})
-          (jar :file "boot-core.jar"))))
+  (set-env! :dependencies (-> settings :core :deps))
+  (with-dir
+    :dir (-> settings :core :dir first)
+    :task (comp (pom :project      'boot/core
+                     :version      version
+                     :description  "Core boot module–boot scripts run in this pod.")
+                (aot :namespace #{'boot.cli 'boot.core 'boot.git 'boot.main 'boot.repl
+                                  'boot.task.built-in 'boot.task-helpers 'boot.tmregistry})
+                (jar :file "boot-core.jar"))))
 
 (deftask base
   [u uberjar bool "build uberjar?"]
@@ -145,40 +185,6 @@ Install Steps
      (jar :file (if uberjar
                   "boot-base-with-dependencies.jar"
                   "boot-base.jar")))))
-
-(deftask with-dir
-  ;; TODO lacks support for classpath scoping
-  [d dir      DIR   str  "directory in fileset to use as root - must end with /"
-   t task     TASK  code "task to run with scoped fileset as input"
-   m merge-fn MERGE code "function to merge resulting fileset with prev"]
-  (let [ptn          (re-pattern (str "^" dir))
-        all-files   #(apply concat ((juxt input-files output-files user-files) %))
-        ;scoped-task  (resolve task)
-        ;; my-task      (fn [next] (fn [fs] (printfs fs) (next fs)))
-        dir-as-root  (fn [fs f] (mv fs (:path f) (string/replace (:path f) ptn "")))
-        undo-scoping (fn [fs f]
-                       (let [exists? (->> fs :tree keys set)
-                             new-loc (str dir (:path f))]
-                         (if (exists? new-loc)
-                           (do
-                             (util/dbug "Moving %s to %s\n" (:path f) new-loc)
-                             (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
-                           (do
-                             (util/dbug "Moving %s to %s\n" (:path f) (:path f))
-                             (assoc-in fs [:tree (:path f)] f)))))]
-    (fn [next-handler]
-      (fn [original-fs]
-        (let [scope-fs #(let [in-scope  (by-re [ptn] (input-files %))
-                              out-scope (not-by-re [ptn] (input-files %))
-                              only-in   (rm % out-scope)]
-                          (reduce dir-as-root only-in in-scope))]
-          ((task
-            (fn [scoped-fs]
-              ;; (clojure.pprint/pprint (:dirs scoped-fs))
-              ;; (println ">>>>>")
-              ;; (clojure.pprint/pprint (:dirs original-fs))
-              (next-handler (reduce undo-scoping original-fs (all-files scoped-fs)))))
-           (scope-fs original-fs)))))))
 
 (deftask build-lib []
   (comp (pod)
