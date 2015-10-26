@@ -66,14 +66,6 @@ Install Steps
   [pred & body]
   `(if-not ~pred identity (do ~@body)))
 
-(defmacro with-env
-  [env & body]
-  (let [orig (into {} (map #(vector % (gensym)) (keys env)))]
-    `(let [~@(mapcat (fn [[k v]] [v `(boot.core/get-env ~k)]) orig)]
-       ~@(for [[k v] env] `(boot.core/set-env! ~k ~v))
-       (boot.util/with-let [ret# (do ~@body)]
-         ~@(for [[k v] orig] `(boot.core/set-env! ~k ~v))))))
-
 (deftask print-paths []
   (with-pre-wrap fs
     (doseq [f (sort-by :path (ls fs))]
