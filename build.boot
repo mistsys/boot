@@ -81,32 +81,48 @@ Install Steps
     (println "--------------------------------")
     fs))
 
+(defn scoper
+  "Returns a variadic function for one or two filesets."
+  [dir]
+  (fn scope-unscope
+    ([fileset]
+     (let [pttrn       (re-pattern (str "^" dir))
+           dir-as-root (fn [fs f] (mv fs (:path f) (string/replace (:path f) pttrn "")))
+           in-scope    (by-re [pttrn] (ls fileset))
+           out-scope   (not-by-re [pttrn] (ls fileset))
+           only-in     (rm fileset out-scope)]
+       (reduce dir-as-root only-in in-scope)))
+    ([original scoped]
+     (reduce (fn [fs f]
+               (let [exists? (->> fs :tree keys set)
+                     new-loc (str dir (:path f))]
+                 (if (exists? new-loc)
+                   (do (util/dbug "Moving %s to %s\n" (:path f) new-loc)
+                       (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
+                   (do (util/dbug "Moving %s to %s\n" (:path f) (:path f))
+                       (assoc-in fs [:tree (:path f)] f)))))
+             original
+             (ls scoped)))))
+
 (deftask with-dir
-  [d dir      DIR   str  "directory in fileset to use as root - must end with /"
-   t task     TASK  code "task to run with scoped fileset as input"
-   m merge-fn MERGE code "function to merge resulting fileset with prev"]
-  (let [ptn          (re-pattern (str "^" dir))
-        dir-as-root  (fn [fs f] (mv fs (:path f) (string/replace (:path f) ptn "")))
-        undo-scoping (fn [fs f]
-                       (let [exists? (->> fs :tree keys set)
-                             new-loc (str dir (:path f))]
-                         (if (exists? new-loc)
-                           (do
-                             (util/dbug "Moving %s to %s\n" (:path f) new-loc)
-                             (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
-                           (do
-                             (util/dbug "Moving %s to %s\n" (:path f) (:path f))
-                             (assoc-in fs [:tree (:path f)] f)))))]
+  ;; TODO generalize to take transformation functions before/after
+  [d dir          DIR   str  "directory in fileset to use as root - must end with /"
+   t task         TASK  code "task to run with scoped fileset as input"
+   m transform-fn TRANS code "function to merge resulting fileset with prev"]
+  (let [scope   #((scoper dir) %)
+        unscope #((scoper dir) %1 %2)
+        prev    (atom {})]
     (fn [next-handler]
       (fn [original-fs]
-        (let [scope-fs #(let [in-scope  (by-re [ptn] (ls %))
-                              out-scope (not-by-re [ptn] (ls %))
-                              only-in   (rm % out-scope)]
-                          (reduce dir-as-root only-in in-scope))]
-          ((task
-            (fn [scoped-fs]
-              (next-handler (commit! (reduce undo-scoping original-fs (ls scoped-fs))))))
-           (commit! (scope-fs original-fs))))))))
+        (let [scoped (scope original-fs)
+              diff   (fileset-diff @prev scoped)]
+          (reset! prev scoped)
+          (if (seq (ls diff))
+            ((task
+              (fn [scoped-fs]
+                (next-handler (commit! (unscope original-fs scoped-fs)))))
+             (commit! scoped))
+            (next-handler original-fs)))))))
 
 (set-env! :resource-paths #{"boot"}
           :source-paths #{"boot"})
