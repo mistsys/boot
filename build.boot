@@ -81,36 +81,54 @@ Install Steps
     (println "--------------------------------")
     fs))
 
-(defn scoper
+(defn same-val [m]
+  (-> (fn [nm [k v]]
+        (let [in-other? (-> (dissoc m k) vals set)]
+          (if (in-other? v)
+            (assoc nm k v)
+            nm)))
+      (reduce nil m)))
+
+(defn dir-scoper
   "Returns a variadic function for one or two filesets."
-  [dir]
+  [dirs]
   (fn scope-unscope
     ([fileset]
-     (let [pttrn       (re-pattern (str "^" dir))
-           dir-as-root (fn [fs f] (mv fs (:path f) (string/replace (:path f) pttrn "")))
-           in-scope    (by-re [pttrn] (ls fileset))
-           out-scope   (not-by-re [pttrn] (ls fileset))
+     (let [pttrns      (re-pattern (string/join "|" (map #(str "^" %) dirs)))
+           path->new   (fn [path] (string/replace path pttrns ""))
+           mapping     (into {} (for [f    (ls fileset)
+                                      :let [old (:path f)
+                                            new (path->new (:path f))]]
+                                  [old (if-not (= new old) new)]))
+           {:keys [rm* mv*]} (group-by #(if (nil? (val %)) :rm* :mv*) mapping)
+           in-scope    (by-path (map first mv*) (ls fileset))
+           out-scope   (by-path (map first rm*) (ls fileset))
            only-in     (rm fileset out-scope)]
-       (reduce dir-as-root only-in in-scope)))
+       (when-let [conflicts (same-val (into {} mv*))]
+         (util/warn "Scoping conflict, files with same relative path exist\n%s"
+                    (with-out-str (clojure.pprint/pprint conflicts))))
+       (reduce #(mv %1 (first %2) (second %2)) only-in mv*)))
     ([original scoped]
      (reduce (fn [fs f]
-               (let [exists? (->> fs :tree keys set)
-                     new-loc (str dir (:path f))]
-                 (if (exists? new-loc)
-                   (do (util/dbug "Moving %s to %s\n" (:path f) new-loc)
-                       (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
-                   (do (util/dbug "Moving %s to %s\n" (:path f) (:path f))
-                       (assoc-in fs [:tree (:path f)] f)))))
+               (let [exists?  (->> fs :tree keys set)
+                     new-locs (map #(str % (:path f)) dirs)
+                     matches  (->> new-locs (map exists?) (remove nil?))]
+                 (let [new-loc (first matches)]
+                   (if (exists? new-loc)
+                     (do (util/dbug "Moving %s to %s\n" (:path f) new-loc)
+                         (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
+                     (do (util/dbug "Moving %s to %s\n" (:path f) (:path f))
+                         (assoc-in fs [:tree (:path f)] f))))))
              original
              (ls scoped)))))
 
 (deftask with-dir
   ;; TODO generalize to take transformation functions before/after
-  [d dir          DIR   str  "directory in fileset to use as root - must end with /"
+  [d dir          DIR  #{str}  "directory in fileset to use as root - must end with /"
    t task         TASK  code "task to run with scoped fileset as input"
    m transform-fn TRANS code "function to merge resulting fileset with prev"]
-  (let [scope   #((scoper dir) %)
-        unscope #((scoper dir) %1 %2)
+  (let [scope   #((dir-scoper dir) %)
+        unscope #((dir-scoper dir) %1 %2)
         prev    (atom {})]
     (fn [next-handler]
       (fn [original-fs]
@@ -131,7 +149,7 @@ Install Steps
   [r launch-repl bool "repl"]
   (set-env! :dependencies (-> settings :pod :deps))
   (with-dir
-    :dir (-> settings :pod :dir first)
+    :dir (-> settings :pod :dir)
     :task (if launch-repl
             (repl)
             (comp (pom :project     'boot/pod
@@ -157,7 +175,7 @@ Install Steps
   ;;    && cp target/aether-$(version)-standalone.jar ../base/src/main/resources/$(aetheruber)
   (set-env! :dependencies (-> settings :aether :deps))
   (with-dir
-    :dir (-> settings :aether :dir first)
+    :dir (-> settings :aether :dir)
     :task (comp (pom :project     'boot/aether
                      :version     version
                      :description "Boot aether module–performs maven dependency resolution.")
@@ -171,7 +189,7 @@ Install Steps
   ;; :jar-exclusions [#"^clojure/core/"]
   (set-env! :dependencies (-> settings :core :deps))
   (with-dir
-    :dir (-> settings :core :dir first)
+    :dir (-> settings :core :dir)
     :task (comp (pom :project      'boot/core
                      :version      version
                      :description  "Core boot module–boot scripts run in this pod.")
