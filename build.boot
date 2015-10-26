@@ -228,13 +228,18 @@ Install Steps
                          "boot-base.jar"))))))
 
 (deftask build-lib []
-  (comp (pod)
-        (aether)
-        (worker)
-        (core)))
+  (comp (base) (pod) (aether) (worker) (core)))
 
 (deftask build-bin []
-  )
+  (comp (base :uberjar true)
+        (with-pre-wrap fs
+          (let [tmp  (tmp-dir!)
+                head (tmp-file (get-in fs [:tree "head.sh"]))
+                ujar (tmp-file (get-in fs [:tree "boot-base-with-dependencies.jar"]))
+                bin  (io/file tmp "boot.sh")]
+            (spit (io/file tmp "boot.sh")
+                  (str (slurp head) (slurp ujar)))
+            (-> fs (add-resource tmp) commit!)))))
 
 ;; Placeholder module, not yet sure what's going on
 #_(deftask boot []
