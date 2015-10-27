@@ -16,36 +16,39 @@ Install Steps
 (import [java.util Properties])
 (require '[clojure.java.io :as io]
          '[clojure.string :as string]
-         '[boot.util :as util])
+         '[boot.util :as util]
+         '[boot.pod :as pod])
 (def propsfile "version.properties")
 (def version (-> (doto (Properties.) (.load (io/input-stream propsfile)))
                (.getProperty "version")))
-;; (def version "2.4.2-SNAPSHOT")
 
 (def pom-base {:version version
                :url     "http://github.com/boot-clj/boot"
                :license {"EPL" "http://www.eclipse.org/legal/epl-v10.html"}
                :scm     {:url "https://github.com/boot-clj/boot.git"}})
+(task-options! pom pom-base)
 
 (def settings
-  {:base {:dir #{"base/src/" "base/resources/"}
+  {:base {:dir {:src #{"boot/base/src/"}
+                :rsc #{"boot/base/resources/"}}
           :deps [['org.projectodd.shimdandy/shimdandy-api "1.2.0"]
                  ['junit/junit "3.8.1" :scope "test"]]}
-   :loader {:dir #{"loader/src/" "loader/resources/"}}
-   :pod {:dir  #{"pod/src/"}
+   :loader {:dir {:src #{"boot/loader/src/"}
+                  :rsc #{"boot/loader/resources/"}}}
+   :pod {:dir  {:src #{"boot/pod/src/"}}
          :deps [['boot/base                               version :scope "provided"]
                 ['org.clojure/clojure                     "1.6.0" :scope "provided"]
                 ['org.tcrawley/dynapath                   "0.2.3" :scope "compile"]
                 ['org.projectodd.shimdandy/shimdandy-impl "1.2.0" :scope "compile"]]}
-   :core {:dir  #{"core/src/"}
+   :core {:dir  #{"boot/core/src/"}
           :deps [['org.clojure/clojure "1.6.0" :scope "provided"]
                  ['boot/base           version :scope "provided"]
                  ['boot/pod            version :scope "compile"]]}
-   :aether {:dir  #{"aether/src/"}
+   :aether {:dir  {:src #{"boot/aether/src/"}}
             :deps [['org.clojure/clojure      "1.6.0" :scope "compile"]
                    ['boot/pod                 version :scope "compile"]
                    ['com.cemerick/pomegranate "0.3.0" :scope "compile"]]}
-   :worker {:dir  #{"worker/src/" "worker/third_party/barbarywatchservice/src/"}
+   :worker {:dir  {:src #{"boot/worker/src/" "boot/worker/third_party/barbarywatchservice/src/"}}
             :deps [['org.clojure/clojure         "1.6.0" :scope "provided"]
                    ['boot/base                   version :scope "provided"]
                    ['boot/aether                 version]
@@ -63,7 +66,14 @@ Install Steps
                    ['org.clojure/data.zip        "0.1.1"]
                    ['org.clojure/tools.namespace "0.2.11"]]}})
 
-(task-options! pom pom-base)
+(defn set-env-for!
+  ([subproject]
+   (set-env-for! subproject false))
+  ([subproject uber?]
+   (set-env! :dependencies   (or (-> settings subproject :deps) [])
+             :source-paths   (or (-> settings subproject :dir :src) #{})
+             :resource-paths (or (-> settings subproject :dir :rsc) #{})
+             :target-path (str "target/" (name subproject) (if uber? "-uber")))))
 
 (defn jarname*
   ([lib]
@@ -75,165 +85,66 @@ Install Steps
   [pred & body]
   `(if-not ~pred identity (do ~@body)))
 
-(deftask print-paths []
-  (with-pre-wrap fs
-    (doseq [f (sort-by :path (ls fs))]
-      (println (:path f)))
-    (println "--------------------------------")
-    fs))
-
-(defn same-val [m]
-  (-> (fn [nm [k v]]
-        (let [in-other? (-> (dissoc m k) vals set)]
-          (if (in-other? v)
-            (assoc nm k v)
-            nm)))
-      (reduce nil m)))
-
-(defn dir-scoper
-  "Returns a variadic function for one or two filesets."
-  [dirs]
-  (fn scope-unscope
-    ([fileset]
-     (let [pttrns      (re-pattern (string/join "|" (map #(str "^" %) dirs)))
-           path->new   (fn [path] (string/replace path pttrns ""))
-           mapping     (into {} (for [f    (ls fileset)
-                                      :let [old (:path f)
-                                            new (path->new (:path f))]]
-                                  [old (if-not (= new old) new)]))
-           {:keys [rm* mv*]} (group-by #(if (nil? (val %)) :rm* :mv*) mapping)
-           in-scope    (by-path (map first mv*) (ls fileset))
-           out-scope   (by-path (map first rm*) (ls fileset))
-           only-in     (rm fileset out-scope)]
-       (when-let [conflicts (same-val (into {} mv*))]
-         (util/warn "Scoping conflict, files with same relative path exist\n%s"
-                    (with-out-str (clojure.pprint/pprint conflicts))))
-       (reduce #(mv %1 (first %2) (second %2)) only-in mv*)))
-    ([original scoped]
-     (reduce (fn [fs f]
-               (let [exists?  (->> fs :tree keys set)
-                     new-locs (map #(str % (:path f)) dirs)
-                     matches  (->> new-locs (map exists?) (remove nil?))]
-                 (let [new-loc (first matches)]
-                   (if (exists? new-loc)
-                     (do (util/dbug "Moving %s to %s\n" (:path f) new-loc)
-                         (assoc-in fs [:tree new-loc] (assoc f :path new-loc)))
-                     (do (util/dbug "Moving %s to %s\n" (:path f) (:path f))
-                         (assoc-in fs [:tree (:path f)] f))))))
-             original
-             (ls scoped)))))
-
-(deftask with-scope
-  ;; TODO generalize to take transformation functions before/after
-  [d dir          DIR  #{str}  "directory in fileset to use as root - must end with /"
-   t task         TASK  code "task to run with scoped fileset as input"
-   m transform-fn TRANS code "function to merge resulting fileset with prev"]
-  (let [scope   #((dir-scoper dir) %)
-        unscope #((dir-scoper dir) %1 %2)
-        prev    (atom {})]
-    (fn [next-handler]
-      (fn [original-fs]
-        (let [scoped (scope original-fs)
-              diff   (fileset-diff @prev scoped)]
-          (reset! prev scoped)
-          (if (seq (ls diff))
-            ((task
-              (fn [scoped-fs]
-                (next-handler (commit! (unscope original-fs scoped-fs)))))
-             (commit! scoped))
-            (next-handler original-fs)))))))
-
-(set-env! :resource-paths #{"boot"}
-          :source-paths #{"boot"})
-
 (deftask pod
   [r launch-repl bool "repl"]
-  (set-env! :dependencies (-> settings :pod :deps))
-  (with-scope
-    :dir (-> settings :pod :dir)
-    :task (if launch-repl
-            (repl)
-            (comp (pom :project     'boot/pod
-                       :description "Boot pod module–this is included with all pods.")
-                  (aot :all true)
-                  (jar :file (jarname* :pod))))))
+  (set-env-for! :pod)
+  (if launch-repl
+    (repl)
+    (comp (pom :project     'boot/pod
+               :description "Boot pod module–this is included with all pods.")
+          (aot :all true)
+          (jar :file (jarname* :pod)))))
 
 (deftask worker []
-  (set-env! :dependencies (-> settings :worker :deps))
-  (with-scope
-    :dir (-> settings :worker :dir)
-    :task (comp (pom :project      'boot/worker
-                     :description  "Boot worker module–this is the worker pod for built-in tasks.")
-                (javac)
-                (aot :all true)
-                (jar :file (jarname* :worker)))))
+  (set-env-for! :worker)
+  (comp (pom :project      'boot/worker
+             :description  "Boot worker module–this is the worker pod for built-in tasks.")
+        (javac)
+        (aot :all true)
+        (jar :file (jarname* :worker))))
 
 (deftask aether
   [u uberjar bool "build uberjar?"]
-  ;; cd bookkt/aether && lein install && lein uberjar && mkdir -p ../base/src/main/resources
-  ;;    && cp target/aether-$(version)-standalone.jar ../base/src/main/resources/$(aetheruber)
-  (set-env! :dependencies (-> settings :aether :deps))
-  (with-scope
-    :dir (-> settings :aether :dir)
-    :task (comp (pom :project     'boot/aether
-                     :description "Boot aether module–performs maven dependency resolution.")
-                (aot :all true)
-                (task-when uberjar (uber))
-                (jar :file (jarname* :aether uberjar)))))
+  (set-env-for! :aether uberjar)
+  (comp (pom :project     'boot/aether
+             :description "Boot aether module–performs maven dependency resolution.")
+        (aot :all true)
+        (task-when uberjar (uber))
+        (jar :file (jarname* :aether uberjar))))
 
 (deftask core []
   ;; :jar-exclusions [#"^clojure/core/"]
-  (set-env! :dependencies (-> settings :core :deps))
-  (with-scope
-    :dir (-> settings :core :dir)
-    :task (comp (pom :project      'boot/core
-                     :description  "Core boot module–boot scripts run in this pod.")
-                (aot :namespace #{'boot.cli 'boot.core 'boot.git 'boot.main 'boot.repl
-                                  'boot.task.built-in 'boot.task-helpers 'boot.tmregistry})
-                (jar :file (jarname* :core)))))
-
-(deftask remove-classfiles []
-  (with-pre-wrap fs
-    (commit! (rm fs (by-ext [".class"] (ls fs))))))
+  (set-env-for! :core)
+  (comp (pom :project      'boot/core
+             :description  "Core boot module–boot scripts run in this pod.")
+        (aot :namespace #{'boot.cli 'boot.core 'boot.git 'boot.main 'boot.repl
+                          'boot.task.built-in 'boot.task-helpers 'boot.tmregistry})
+        (jar :file (jarname* :core))))
 
 (deftask loader []
-  (set-env! :dependencies [])
-  (comp
-   (remove-classfiles)
-   (with-scope
-     :dir  (-> settings :loader :dir)
-     :task (comp
-            (pom :project     'boot/loader
-                 :description "Boot loader class.")
-            (javac)
-            (jar :file (jarname* :loader))))))
+  (set-env-for! :loader)
+  (comp (pom :project     'boot/loader
+             :description "Boot loader class.")
+        (javac)
+        (jar :file (jarname* :loader))))
 
 (deftask base
   [u uberjar bool "build uberjar?"]
-  (comp
-   (task-when uberjar (aether :uberjar true))
-   (task-when uberjar (sift :add-resource #{(jarname* :aether true)}))
-   (task-when uberjar (sift :move {(re-pattern (str "^" (jarname* :aether true) "$"))
-                                   (str (-> settings :base :dir first) "boot-aether-uber.jar")}))
-   (remove-classfiles)
-   (with-scope
-     :dir (-> settings :base :dir)
-     :task (comp
-            (with-pre-wrap fs
-              (set-env! :dependencies (-> settings :base :deps))
-              (let [t (tmp-dir!)
-                    f (io/file t "boot/base/version.properties")]
-                (io/make-parents f)
-                (spit f (str "version=" version))
-                (-> fs (add-resource t) commit!)))
-            (pom :project     'boot/base
-                 :description "Boot Java application loader and class.")
-            (javac)
-            ;; (task-when uberjar (uber :as-jars true))
-            (jar :file (jarname* :base uberjar))))))
+  (set-env-for! :base uberjar)
+  (comp (with-pre-wrap fs
+          (let [t (tmp-dir!)
+                f (io/file t "boot/base/version.properties")]
+            (io/make-parents f)
+            (spit f (str "version=" version))
+            (-> fs (add-resource t) commit!)))
+        (pom :project     'boot/base
+             :description "Boot Java application loader and class.")
+        (javac)
+        (task-when uberjar (uber))
+        (jar :file (jarname* :base uberjar))))
 
-(deftask build-lib []
-  (comp (base) (pod) (aether) (worker) (core)))
+;; (deftask build-lib []
+;;   (comp (base) (pod) (aether) (worker) (core)))
 
 (deftask build-bin []
   (comp (loader)
@@ -247,8 +158,46 @@ Install Steps
             (-> fs (add-resource tmp) commit!)))))
 
 (deftask transaction-jar []
-  (comp (sift :include #{#"^boot"})
-        ;; (print-paths)
-        (pom :project      'boot/boot
+  (comp (pom :project      'boot/boot
              :description  "Placeholder to synchronize other boot module versions.")
         (jar)))
+
+(defn runboot
+  [& boot-args]
+  (future
+    (boot.App/runBoot
+      (boot.App/newCore)
+      (future @pod/worker-pod)
+      (into-array String boot-args))))
+
+(deftask pick
+  [f files PATH #{str} "The files to pick."
+   d dir PATH     str  "The directory to put the files."]
+  (with-pre-wrap [fs]
+    (with-let [fs fs]
+      (let [files (->> (output-files fs)
+                       (map (juxt tmp-path tmp-file))
+                       (filter #((or files #{}) (first %))))]
+        (doseq [[p f] files]
+          (when (.exists f)
+            (io/copy f (io/file dir p))))))))
+
+(deftask build
+  []
+  (info "Building base...\n")
+  (runboot "watch" "base")
+  (info "Building pod...\n")
+  (runboot "watch" "pod")
+  (info "Building core...\n")
+  (runboot "watch" "core")
+  (info "Building worker...\n")
+  (runboot "watch" "worker")
+  (info "Building aether...\n")
+  (runboot "watch" "aether")
+  (info "Building loader...\n")
+  (runboot "watch" "loader")
+  (info "Building aether uberjar...\n")
+  (runboot "watch" "aether" "--uberjar" "pick" "-d" "boot/base/resources" "-f" (jarname* :aether true))
+  (info "Building base uberjar...\n")
+  (runboot "watch" "base" "--uberjar")
+  (wait))
