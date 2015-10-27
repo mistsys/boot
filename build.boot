@@ -18,17 +18,20 @@ Install Steps
          '[clojure.string :as string]
          '[boot.util :as util])
 (def propsfile "version.properties")
-(def version "2.3.1-SNAPSHOT" #_(-> (doto (Properties.) (.load (io/input-stream propsfile)))
+(def version (-> (doto (Properties.) (.load (io/input-stream propsfile)))
                (.getProperty "version")))
+;; (def version "2.4.2-SNAPSHOT")
 
-(def pom-base {:url     "http://github.com/boot-clj/boot"
+(def pom-base {:version version
+               :url     "http://github.com/boot-clj/boot"
                :license {"EPL" "http://www.eclipse.org/legal/epl-v10.html"}
                :scm     {:url "https://github.com/boot-clj/boot.git"}})
 
 (def settings
-  {:base {:dir #{"base/src/"}
+  {:base {:dir #{"base/src/" "base/resources/"}
           :deps [['org.projectodd.shimdandy/shimdandy-api "1.2.0"]
                  ['junit/junit "3.8.1" :scope "test"]]}
+   :loader {:dir #{"loader/src/" "loader/resources/"}}
    :pod {:dir  #{"pod/src/"}
          :deps [['boot/base                               version :scope "provided"]
                 ['org.clojure/clojure                     "1.6.0" :scope "provided"]
@@ -61,6 +64,12 @@ Install Steps
                    ['org.clojure/tools.namespace "0.2.11"]]}})
 
 (task-options! pom pom-base)
+
+(defn jarname*
+  ([lib]
+   (jarname* lib false))
+  ([lib uber?]
+   (str "boot-" (name lib) "-" version (when uber? "-uber") ".jar")))
 
 (defmacro task-when
   [pred & body]
@@ -145,21 +154,19 @@ Install Steps
     :task (if launch-repl
             (repl)
             (comp (pom :project     'boot/pod
-                       :version     version
                        :description "Boot pod module–this is included with all pods.")
                   (aot :all true)
-                  (jar :file "boot-pod.jar")))))
+                  (jar :file (jarname* :pod))))))
 
 (deftask worker []
   (set-env! :dependencies (-> settings :worker :deps))
   (with-scope
     :dir (-> settings :worker :dir)
     :task (comp (pom :project      'boot/worker
-                     :version      version
                      :description  "Boot worker module–this is the worker pod for built-in tasks.")
                 (javac)
                 (aot :all true)
-                (jar :file "boot-worker.jar"))))
+                (jar :file (jarname* :worker)))))
 
 (deftask aether
   [u uberjar bool "build uberjar?"]
@@ -169,13 +176,10 @@ Install Steps
   (with-scope
     :dir (-> settings :aether :dir)
     :task (comp (pom :project     'boot/aether
-                     :version     version
                      :description "Boot aether module–performs maven dependency resolution.")
                 (aot :all true)
                 (task-when uberjar (uber))
-                (jar :file (if uberjar
-                             "boot-aether-uber.jar"
-                             "boot-aether.jar")))))
+                (jar :file (jarname* :aether uberjar)))))
 
 (deftask core []
   ;; :jar-exclusions [#"^clojure/core/"]
@@ -183,60 +187,68 @@ Install Steps
   (with-scope
     :dir (-> settings :core :dir)
     :task (comp (pom :project      'boot/core
-                     :version      version
                      :description  "Core boot module–boot scripts run in this pod.")
                 (aot :namespace #{'boot.cli 'boot.core 'boot.git 'boot.main 'boot.repl
                                   'boot.task.built-in 'boot.task-helpers 'boot.tmregistry})
-                (jar :file "boot-core.jar"))))
+                (jar :file (jarname* :core)))))
 
 (deftask remove-classfiles []
   (with-pre-wrap fs
     (commit! (rm fs (by-ext [".class"] (ls fs))))))
 
+(deftask loader []
+  (set-env! :dependencies [])
+  (comp
+   (remove-classfiles)
+   (with-scope
+     :dir  (-> settings :loader :dir)
+     :task (comp
+            (pom :project     'boot/loader
+                 :description "Boot loader class.")
+            (javac)
+            (jar :file (jarname* :loader))))))
+
 (deftask base
   [u uberjar bool "build uberjar?"]
-  (set-env! :dependencies (-> settings :base :deps))
   (comp
    (task-when uberjar (aether :uberjar true))
-   (task-when uberjar (sift :add-resource #{"boot-aether-uber.jar"}))
-   (task-when uberjar (sift :move {#"^boot-aether-uber.jar$" (str (-> settings :base :dir first) "boot-aether-uber.jar")}))
+   (task-when uberjar (sift :add-resource #{(jarname* :aether true)}))
+   (task-when uberjar (sift :move {(re-pattern (str "^" (jarname* :aether true) "$"))
+                                   (str (-> settings :base :dir first) "boot-aether-uber.jar")}))
    (remove-classfiles)
    (with-scope
      :dir (-> settings :base :dir)
      :task (comp
             (with-pre-wrap fs
+              (set-env! :dependencies (-> settings :base :deps))
               (let [t (tmp-dir!)
                     f (io/file t "boot/base/version.properties")]
                 (io/make-parents f)
                 (spit f (str "version=" version))
                 (-> fs (add-resource t) commit!)))
             (pom :project     'boot/base
-                 :version     version
                  :description "Boot Java application loader and class.")
             (javac)
-            (task-when uberjar (uber))
-            (jar :file (if uberjar
-                         "boot-base-with-dependencies.jar"
-                         "boot-base.jar"))))))
+            ;; (task-when uberjar (uber :as-jars true))
+            (jar :file (jarname* :base uberjar))))))
 
 (deftask build-lib []
   (comp (base) (pod) (aether) (worker) (core)))
 
 (deftask build-bin []
-  (comp (base :uberjar true)
+  (comp (loader)
         (with-pre-wrap fs
           (let [tmp  (tmp-dir!)
                 head (tmp-file (get-in fs [:tree "head.sh"]))
-                ujar (tmp-file (get-in fs [:tree "boot-base-with-dependencies.jar"]))
+                ujar (tmp-file (get-in fs [:tree (jarname* :loader)]))
                 bin  (io/file tmp "boot.sh")]
             (spit (io/file tmp "boot.sh")
                   (str (slurp head) (slurp ujar)))
             (-> fs (add-resource tmp) commit!)))))
 
-;; Placeholder module, not yet sure what's going on
-#_(deftask boot []
-  (set-env! :source-paths #{} :dependencies [])
-  (task-options! pom {:project      'boot
-                      :version      version
-                      :description  "Placeholder to synchronize other boot module versions."})
-  identity)
+(deftask transaction-jar []
+  (comp (sift :include #{#"^boot"})
+        ;; (print-paths)
+        (pom :project      'boot/boot
+             :description  "Placeholder to synchronize other boot module versions.")
+        (jar)))
