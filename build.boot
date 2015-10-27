@@ -81,6 +81,13 @@ Install Steps
   ([lib uber?]
    (str "boot-" (name lib) "-" version (when uber? "-uber") ".jar")))
 
+(deftask print-paths []
+  (with-pre-wrap fs
+    (println "Paths =====================================")
+    (doseq [f (take 100 (sort (-> fs :tree keys)))]
+      (println f))
+    fs))
+
 (defmacro task-when
   [pred & body]
   `(if-not ~pred identity (do ~@body)))
@@ -140,7 +147,18 @@ Install Steps
         (pom :project     'boot/base
              :description "Boot Java application loader and class.")
         (javac)
+        (print-paths)
+        ;; (with-pre-wrap fs
+        ;;   (let [tgt (tmp-dir!)
+        ;;         f (get-in fs [:tree "boot-aether-2.4.2-SNAPSHOT-uber.jar"])]
+        ;;     (pod/unpack-jar (tmp-file f) tgt
+        ;;                     :mergers pod/standard-jar-mergers
+        ;;                     :include #{}
+        ;;                     :exclude pod/standard-jar-exclusions)
+        ;;     (-> fs (add-resource tgt :mergers pod/standard-jar-mergers) commit!)))
+        ;; (print-paths)
         (task-when uberjar (uber))
+        (print-paths)
         (jar :file (jarname* :base uberjar))))
 
 ;; (deftask build-lib []
@@ -184,18 +202,18 @@ Install Steps
 
 (deftask build
   []
-  (info "Building base...\n")
-  (runboot "watch" "base")
-  (info "Building pod...\n")
-  (runboot "watch" "pod")
-  (info "Building core...\n")
-  (runboot "watch" "core")
-  (info "Building worker...\n")
-  (runboot "watch" "worker")
-  (info "Building aether...\n")
-  (runboot "watch" "aether")
-  (info "Building loader...\n")
-  (runboot "watch" "loader")
+  ;; (info "Building base...\n")
+  ;; (runboot "watch" "base")
+  ;; (info "Building pod...\n")
+  ;; (runboot "watch" "pod")
+  ;; (info "Building core...\n")
+  ;; (runboot "watch" "core")
+  ;; (info "Building worker...\n")
+  ;; (runboot "watch" "worker")
+  ;; (info "Building aether...\n")
+  ;; (runboot "watch" "aether")
+  ;; (info "Building loader...\n")
+  ;; (runboot "watch" "loader")
   (info "Building aether uberjar...\n")
   (runboot "watch" "aether" "--uberjar" "pick" "-d" "boot/base/resources" "-f" (jarname* :aether true))
   (info "Building base uberjar...\n")
